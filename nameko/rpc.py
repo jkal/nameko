@@ -34,6 +34,12 @@ def get_rpc_exchange(config):
     return exchange
 
 
+def get_reply_exchange(config):
+    exchange_name = '{}-reply'.format(config.get(RPC_EXCHANGE_CONFIG_KEY, 'nameko-rpc'))
+    exchange = Exchange(exchange_name, durable=True, type="topic")
+    return exchange
+
+
 class RpcConsumer(SharedExtension, ProviderCollector):
 
     queue_consumer = QueueConsumer()
@@ -104,7 +110,15 @@ class RpcConsumer(SharedExtension, ProviderCollector):
             raise MethodNotFound(method_name)
 
     def handle_message(self, body, message):
-        routing_key = message.delivery_info['routing_key']
+        # When using queue federation, the federation mechanism posts the message
+        # to the default downstream exchange using the queue name as the routing
+        # key. To support this scenario, we check for the original routing key in
+        # the headers and use that instead.
+        if 'x-original-routing-key' in message.headers:
+            routing_key = message.headers['x-original-routing-key']
+        else:
+            routing_key = message.delivery_info['routing_key']
+
         try:
             provider = self.get_provider_for_method(routing_key)
             provider.handle_message(body, message)
@@ -213,7 +227,7 @@ class Responder(object):
 
         conn = Connection(self.config[AMQP_URI_CONFIG_KEY])
 
-        exchange = get_rpc_exchange(self.config)
+        exchange = get_reply_exchange(self.config)
 
         retry = kwargs.pop('retry', True)
         retry_policy = kwargs.pop('retry_policy', DEFAULT_RETRY_POLICY)
@@ -253,14 +267,14 @@ class ReplyListener(SharedExtension):
 
         self.routing_key = str(service_uuid)
 
-        exchange = get_rpc_exchange(self.container.config)
+        exchange = get_reply_exchange(self.container.config)
 
         self.queue = Queue(
             queue_name,
             exchange=exchange,
             routing_key=self.routing_key,
             auto_delete=True,
-            exclusive=True,
+            exclusive=False,
         )
 
         self.queue_consumer.register_provider(self)
